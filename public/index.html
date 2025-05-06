@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Football Watchparty</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/socket.io/socket.io.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+  <div class="container">
+    <h1><i class="fas fa-futbol"></i> Football Watchparty</h1>
+    
+    <div id="room-setup" class="card">
+      <h2>Create or Join a Room</h2>
+      <div class="input-group">
+        <input type="text" id="username" placeholder="Your name">
+      </div>
+      <div class="input-group">
+        <input type="text" id="room-id" placeholder="Enter room ID (leave empty to create new)">
+        <button id="join-room"><i class="fas fa-sign-in-alt"></i> Join Room</button>
+      </div>
+      <div class="features">
+        <div class="feature-item">
+          <i class="fas fa-users"></i>
+          <span>Watch with friends</span>
+        </div>
+        <div class="feature-item">
+          <i class="fas fa-sync-alt"></i>
+          <span>Synchronized playback</span>
+        </div>
+        <div class="feature-item">
+          <i class="fas fa-link"></i>
+          <span>Share any video</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="video-setup" class="card hidden">
+      <h2>Room: <span id="current-room"></span></h2>
+      <div class="room-info">
+        <div class="share-box">
+          <p><i class="fas fa-share-alt"></i> Share this room ID with friends to watch together</p>
+          <button id="copy-room" class="secondary-button"><i class="fas fa-copy"></i> Copy Room ID</button>
+        </div>
+      </div>
+      <div class="input-group">
+        <input type="text" id="video-link" placeholder="Paste video link (e.g., YouTube, Vimeo, etc.)">
+        <button id="set-video"><i class="fas fa-play-circle"></i> Set Video</button>
+      </div>
+      <div id="participants"></div>
+    </div>
+
+    <div id="player-container" class="hidden">
+      <video id="video-player" controls></video>
+      <div class="controls">
+        <button id="play-pause"><i class="fas fa-play"></i> Play</button>
+        <button id="sync-video"><i class="fas fa-sync"></i> Sync with Room</button>
+      </div>
+    </div>
+    
+    <div id="status" class="status"></div>
+    
+    <footer>
+      <p>© 2025 Football Watchparty - Watch matches together in real-time</p>
+    </footer>
+  </div>
+  
+  <script src="/client.js"></script>
+</body>
+</html>
