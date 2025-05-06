@@ -27,13 +27,33 @@ let youtubePlayer = null;
 
 // Initialize
 function init() {
-  // Check if user was in a room before (from localStorage)
-  const savedRoom = localStorage.getItem('watchparty_room');
-  const savedName = localStorage.getItem('watchparty_username');
+  // Clear all input fields on first load
+  roomIdInput.value = '';
+  usernameInput.value = '';
+  videoLinkInput.value = '';
   
-  if (savedRoom && savedName) {
-    roomIdInput.value = savedRoom;
-    usernameInput.value = savedName;
+  // Check for first time visit
+  const firstVisit = localStorage.getItem('watchparty_visited') !== 'true';
+  
+  if (firstVisit) {
+    // First time visitor - set the flag for future visits
+    localStorage.setItem('watchparty_visited', 'true');
+    
+    // Clear any old data
+    localStorage.removeItem('watchparty_room');
+    localStorage.removeItem('watchparty_username');
+  } else {
+    // Returning visitor - we could load saved data, but per request, we'll keep fields empty
+    // Uncomment below if you want to restore previous session values
+    /*
+    const savedRoom = localStorage.getItem('watchparty_room');
+    const savedName = localStorage.getItem('watchparty_username');
+    
+    if (savedRoom && savedName) {
+      roomIdInput.value = savedRoom;
+      usernameInput.value = savedName;
+    }
+    */
   }
 }
 
