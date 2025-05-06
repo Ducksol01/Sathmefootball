@@ -115,14 +115,30 @@ function setVideo() {
     return;
   }
   
-  // Process the video link to get embed URL if needed
-  const processedLink = processVideoLink(videoLink);
-  
-  socket.emit('set-video', { 
-    roomId: currentRoom, 
-    videoLink: processedLink, 
-    setBy: username 
-  });
+  try {
+    // Process the video link to get embed URL if needed
+    const processedLink = processVideoLink(videoLink);
+    
+    // First check if the URL is valid
+    if (!processedLink) {
+      showStatus('Unable to process video URL. Please check the link format.', 'error');
+      return;
+    }
+    
+    // Preview the video locally first to verify it works
+    handleVideoEmbed(processedLink);
+    playerContainerDiv.classList.remove('hidden');
+    
+    // Then send to others in the room
+    socket.emit('set-video', { 
+      roomId: currentRoom, 
+      videoLink: processedLink, 
+      setBy: username 
+    });
+  } catch (error) {
+    console.error('Error setting video:', error);
+    showStatus('Error processing video URL: ' + error.message, 'error');
+  }
 }
 
 function togglePlayPause() {
@@ -225,6 +241,13 @@ function updateParticipants(participants) {
 socket.on('room-joined', (data) => {
   updateParticipants(data.participants);
   showStatus(`${data.username} joined the room`, 'success');
+  
+  // Request sync from other participants to make sure we're in sync
+  // Small delay to ensure connection is fully established
+  setTimeout(() => {
+    console.log('Requesting initial sync after joining room');
+    requestSync();
+  }, 1000);
 });
 
 socket.on('room-left', (data) => {
@@ -233,6 +256,7 @@ socket.on('room-left', (data) => {
 });
 
 socket.on('video-set', (data) => {
+  console.log(`Received video-set event: ${data.videoLink} by ${data.setBy}`);
   videoLinkInput.value = data.videoLink;
   
   // Handle the video based on its type
@@ -240,6 +264,12 @@ socket.on('video-set', (data) => {
   playerContainerDiv.classList.remove('hidden');
   
   showStatus(`Video set by ${data.setBy}`, 'success');
+  
+  // Request synchronization after a short delay to ensure video is loaded
+  setTimeout(() => {
+    console.log('Requesting sync after video set');
+    requestSync();
+  }, 2000);
 });
 
 socket.on('video-play', () => {
@@ -370,45 +400,101 @@ socket.on('connect_error', () => {
 
 // Process video link to get proper embed URL
 function processVideoLink(url) {
-  // YouTube
-  if (url.includes('youtube.com/watch') || url.includes('youtu.be/')) {
-    let videoId = '';
-    
-    if (url.includes('youtube.com/watch')) {
-      const urlParams = new URLSearchParams(new URL(url).search);
-      videoId = urlParams.get('v');
-    } else if (url.includes('youtu.be/')) {
-      videoId = url.split('youtu.be/')[1].split('?')[0];
+  try {
+    // Try to create a URL object to validate the URL
+    // This will throw an error if the URL is invalid
+    let validatedUrl;
+    try {
+      validatedUrl = new URL(url);
+    } catch (e) {
+      // If it's not a valid URL, try adding https:// prefix
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        validatedUrl = new URL('https://' + url);
+        url = 'https://' + url;
+      } else {
+        throw new Error('Invalid URL format');
+      }
+    }
+
+    // YouTube
+    if (url.includes('youtube.com/watch') || url.includes('youtu.be/')) {
+      let videoId = '';
+      
+      if (url.includes('youtube.com/watch')) {
+        const urlParams = new URLSearchParams(new URL(url).search);
+        videoId = urlParams.get('v');
+      } else if (url.includes('youtu.be/')) {
+        videoId = url.split('youtu.be/')[1];
+        if (videoId.includes('?')) {
+          videoId = videoId.split('?')[0];
+        }
+      }
+      
+      if (videoId) {
+        return `https://www.youtube.com/embed/${videoId}?enablejsapi=1&autoplay=1&controls=1`;
+      }
     }
     
-    if (videoId) {
-      return `https://www.youtube.com/embed/${videoId}?enablejsapi=1&autoplay=1&controls=1`;
+    // Vimeo
+    if (url.includes('vimeo.com/')) {
+      // Handle regular vimeo URLs
+      let vimeoId = '';
+      const vimeoRegex = /vimeo\.com\/(?:video\/)?([0-9]+)/;
+      const match = url.match(vimeoRegex);
+      
+      if (match && match[1]) {
+        vimeoId = match[1];
+      } else {
+        vimeoId = url.split('vimeo.com/')[1];
+        if (vimeoId && vimeoId.includes('?')) {
+          vimeoId = vimeoId.split('?')[0];
+        }
+        if (vimeoId && vimeoId.includes('/')) {
+          vimeoId = vimeoId.split('/')[0];
+        }
+      }
+      
+      if (vimeoId) {
+        return `https://player.vimeo.com/video/${vimeoId}?autoplay=1`;
+      }
     }
-  }
-  
-  // Vimeo
-  if (url.includes('vimeo.com/')) {
-    const vimeoId = url.split('vimeo.com/')[1].split('?')[0].split('/')[0];
-    if (vimeoId) {
-      return `https://player.vimeo.com/video/${vimeoId}?autoplay=1`;
+    
+    // Dailymotion
+    if (url.includes('dailymotion.com/video/')) {
+      const dmId = url.split('dailymotion.com/video/')[1];
+      if (dmId && dmId.includes('?')) {
+        return `https://www.dailymotion.com/embed/video/${dmId.split('?')[0]}?autoplay=1`;
+      } else {
+        return `https://www.dailymotion.com/embed/video/${dmId}?autoplay=1`;
+      }
     }
-  }
-  
-  // Dailymotion
-  if (url.includes('dailymotion.com/video/')) {
-    const dmId = url.split('dailymotion.com/video/')[1].split('?')[0];
-    if (dmId) {
-      return `https://www.dailymotion.com/embed/video/${dmId}?autoplay=1`;
+    
+    // For direct video files (mp4, webm, etc.)
+    if (url.match(/\.(mp4|webm|ogg|mov|mkv)$/i)) {
+      return url;
     }
-  }
-  
-  // For direct video files (mp4, webm, etc.)
-  if (url.match(/\.(mp4|webm|ogg)$/i)) {
+
+    // For Facebook videos
+    if (url.includes('facebook.com/watch') || url.includes('fb.watch')) {
+      // Facebook doesn't allow embeds via iframe, so we'll just return a message
+      showStatus('Facebook videos cannot be embedded directly. Please use YouTube, Vimeo, or direct video links.', 'error');
+      return null;
+    }
+    
+    // Try to detect if it's a video file hosted on a server
+    if (url.includes('.mp4') || url.includes('.webm') || url.includes('.ogg') || 
+        url.includes('.mov') || url.includes('.mkv')) {
+      return url;
+    }
+    
+    // If we can't process it, return the original URL with a warning
+    showStatus('Unknown video format. The video may not play correctly.', 'warning');
     return url;
+  } catch (error) {
+    console.error('Error processing video URL:', error);
+    showStatus('Invalid video URL format. Please check the link.', 'error');
+    return null;
   }
-  
-  // If we can't process it, return the original URL
-  return url;
 }
 
 // Handle video embedding based on URL
@@ -520,8 +606,83 @@ function handleVideoEmbed(url) {
       }
     });
   } else {
-    // For other types of URLs, show a message
-    showStatus('This video format may not be supported. Try a YouTube, Vimeo, or direct MP4 link.', 'error');
+    // Try to handle other types of URLs as general media
+    // First, check if it's a direct video file that wasn't caught earlier
+    if (url.includes('.mp4') || url.includes('.webm') || url.includes('.ogg') || 
+        url.includes('.mov') || url.includes('.m3u8')) {
+      videoType = 'direct';
+      
+      playerContainer.innerHTML = `
+        <video id="video-player" controls></video>
+        <div class="controls">
+          <button id="play-pause">Play</button>
+          <button id="sync-video">Sync with Room</button>
+        </div>
+      `;
+      
+      // Re-attach event listeners
+      const videoPlayer = document.getElementById('video-player');
+      const playPauseButton = document.getElementById('play-pause');
+      const syncButton = document.getElementById('sync-video');
+      
+      videoPlayer.src = url;
+      
+      playPauseButton.addEventListener('click', togglePlayPause);
+      syncButton.addEventListener('click', requestSync);
+      
+      videoPlayer.addEventListener('play', () => {
+        if (!isSyncingVideo) {
+          socket.emit('video-play', { roomId: currentRoom });
+          playPauseButton.textContent = 'Pause';
+        }
+      });
+      
+      videoPlayer.addEventListener('pause', () => {
+        if (!isSyncingVideo) {
+          socket.emit('video-pause', { roomId: currentRoom });
+          playPauseButton.textContent = 'Play';
+        }
+      });
+      
+      videoPlayer.addEventListener('seeked', () => {
+        if (!isSyncingVideo) {
+          socket.emit('video-seek', { 
+            roomId: currentRoom, 
+            currentTime: videoPlayer.currentTime 
+          });
+        }
+      });
+
+      // Add error handling for video
+      videoPlayer.addEventListener('error', (e) => {
+        console.error('Video error:', videoPlayer.error);
+        showStatus(`Error loading video: ${videoPlayer.error?.message || 'Unknown error'}`, 'error');
+      });
+    } else {
+      // Last resort: try to use an iframe for any other URL
+      videoType = 'embed';
+      
+      playerContainer.innerHTML = `
+        <div class="video-wrapper">
+          <iframe 
+            id="video-frame" 
+            src="${url}" 
+            frameborder="0" 
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+            allowfullscreen>
+          </iframe>
+        </div>
+        <div class="controls">
+          <button id="sync-video">Sync with Room</button>
+        </div>
+        <div class="warning-message">
+          <p>This video source may not work correctly. If you have issues, try YouTube, Vimeo, or direct video links.</p>
+        </div>
+      `;
+      
+      // Re-attach sync button event listener
+      document.getElementById('sync-video').addEventListener('click', requestSync);
+    }
   }
 }
 

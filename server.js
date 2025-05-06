@@ -11,17 +11,56 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Initialize Sequelize with PostgreSQL
-const sequelize = new Sequelize(process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/watchparty', {
-  dialect: 'postgres',
-  dialectOptions: {
-    ssl: process.env.NODE_ENV === 'production' ? {
-      require: true,
-      rejectUnauthorized: false
-    } : false
-  },
-  logging: false
-});
+// For local development, allow SQLite fallback if PostgreSQL isn't available
+let sequelize;
+const useSqlite = !process.env.DATABASE_URL && process.env.NODE_ENV !== 'production';
+
+if (useSqlite) {
+  console.log('Using SQLite for local development');
+  // Dynamically import sqlite3
+  try {
+    const sqlite3 = require('sqlite3').verbose();
+    const db = new sqlite3.Database('./watchparty.db');
+    console.log('SQLite database connected');
+    
+    // Create tables if they don't exist
+    db.serialize(() => {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS rooms (
+          id TEXT PRIMARY KEY,
+          video_link TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      
+      db.run(`
+        CREATE TABLE IF NOT EXISTS participants (
+          id TEXT PRIMARY KEY,
+          room_id TEXT,
+          username TEXT,
+          last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (room_id) REFERENCES rooms(id)
+        )
+      `);
+    });
+    
+    // We'll use our SQLite handlers below
+  } catch (error) {
+    console.error('SQLite not available:', error.message);
+  }
+} else {
+  // Use PostgreSQL (for production or if explicitly configured locally)
+  sequelize = new Sequelize(process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/watchparty', {
+    dialect: 'postgres',
+    dialectOptions: {
+      ssl: process.env.NODE_ENV === 'production' ? {
+        require: true,
+        rejectUnauthorized: false
+      } : false
+    },
+    logging: false
+  });
+}
 
 // Define models
 const Room = sequelize.define('Room', {
@@ -67,19 +106,22 @@ const Participant = sequelize.define('Participant', {
   tableName: 'participants'
 });
 
-// Define associations
-Room.hasMany(Participant, { foreignKey: 'room_id' });
-Participant.belongsTo(Room, { foreignKey: 'room_id' });
+// Only do Sequelize setup if not using SQLite
+if (!useSqlite) {
+  // Define associations
+  Room.hasMany(Participant, { foreignKey: 'room_id' });
+  Participant.belongsTo(Room, { foreignKey: 'room_id' });
 
-// Sync database
-(async () => {
-  try {
-    await sequelize.sync();
-    console.log('Database synchronized successfully');
-  } catch (error) {
-    console.error('Unable to sync database:', error);
-  }
-})();
+  // Sync database
+  (async () => {
+    try {
+      await sequelize.sync();
+      console.log('PostgreSQL database synchronized successfully');
+    } catch (error) {
+      console.error('Unable to sync database:', error);
+    }
+  })();
+}
 
 
 // Serve static files from the public directory
@@ -87,6 +129,17 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Room data cache (in-memory)
 const rooms = new Map();
+
+// Debug function to log room state
+function logRoomState(roomId) {
+  if (rooms.has(roomId)) {
+    const room = rooms.get(roomId);
+    console.log(`Room ${roomId} state: ${room.participants.size} participants, video: ${room.videoLink || 'none'}`);
+    console.log('Participants:', Array.from(room.participants.entries()));
+  } else {
+    console.log(`Room ${roomId} not found in cache`);
+  }
+}
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -96,57 +149,154 @@ io.on('connection', (socket) => {
   
   // Join Room
   socket.on('join-room', async (data) => {
-    try {
-      const { roomId, username } = data;
-      currentRoom = roomId;
-      currentUsername = username;
-      
-      // Join the Socket.io room
-      socket.join(roomId);
-      
-      // Check if room exists in database
-      let room = await Room.findByPk(roomId);
-      
-      // If room doesn't exist, create it
-      if (!room) {
-        room = await Room.create({ id: roomId });
-      }
-      
-      // Add participant to the database
-      const participantId = socket.id;
-      await Participant.upsert({
-        id: participantId,
-        room_id: roomId,
-        username: username,
-        last_active: new Date()
-      });
-      
-      // Get all participants in the room
-      const participants = await Participant.findAll({
-        where: { room_id: roomId },
-        attributes: ['username']
-      });
-      
-      const participantNames = participants.map(p => p.username);
-      
-      // Update room cache
-      if (!rooms.has(roomId)) {
-        rooms.set(roomId, {
-          participants: new Map(),
-          videoLink: room ? room.video_link : null
+    const { roomId, username } = data;
+    currentRoom = roomId;
+    currentUsername = username;
+    
+    console.log(`User ${username} (${socket.id}) joining room: ${roomId}`);
+    
+    // Join the Socket.io room
+    socket.join(roomId);
+    
+    if (useSqlite) {
+      // SQLite implementation
+      try {
+        const sqlite3 = require('sqlite3').verbose();
+        const db = new sqlite3.Database('./watchparty.db');
+        
+        // Check if room exists in database
+        db.get('SELECT * FROM rooms WHERE id = ?', [roomId], (err, room) => {
+          if (err) {
+            console.error('Database error:', err);
+            return;
+          }
+          
+          // If room doesn't exist, create it
+          if (!room) {
+            db.run('INSERT INTO rooms (id) VALUES (?)', [roomId], (err) => {
+              if (err) console.error('Error creating room:', err);
+            });
+          }
+          
+          // Add participant to the database
+          const participantId = socket.id;
+          db.run(
+            'INSERT OR REPLACE INTO participants (id, room_id, username) VALUES (?, ?, ?)',
+            [participantId, roomId, username],
+            (err) => {
+              if (err) console.error('Error adding participant:', err);
+            }
+          );
+          
+          // Get all participants in the room
+          db.all('SELECT username FROM participants WHERE room_id = ?', [roomId], (err, participants) => {
+            if (err) {
+              console.error('Error getting participants:', err);
+              return;
+            }
+            
+            const participantNames = participants.map(p => p.username);
+            
+            // Update room cache
+            if (!rooms.has(roomId)) {
+              console.log(`Creating new room in cache: ${roomId}`);
+              rooms.set(roomId, {
+                participants: new Map(),
+                videoLink: room ? room.video_link : null
+              });
+            } else {
+              console.log(`Existing room found in cache: ${roomId}`);
+            }
+            
+            // Add participant to room cache
+            rooms.get(roomId).participants.set(socket.id, username);
+            
+            // Log room state after joining
+            logRoomState(roomId);
+            
+            // Notify all clients in the room about the new participant
+            io.to(roomId).emit('room-joined', {
+              username,
+              participants: participantNames
+            });
+            
+            // Send current video to the new participant if it exists
+            const currentRoom = rooms.get(roomId);
+            if (currentRoom && currentRoom.videoLink) {
+              console.log(`Sending existing video to new participant: ${username}`);
+              socket.emit('video-set', {
+                videoLink: currentRoom.videoLink,
+                setBy: 'someone in the room'
+              });
+            }
+          });
         });
+      } catch (error) {
+        console.error('Error with SQLite operations:', error);
       }
-      
-      // Add participant to room cache
-      rooms.get(roomId).participants.set(socket.id, username);
-      
-      // Notify all clients in the room about the new participant
-      io.to(roomId).emit('room-joined', {
-        username,
-        participants: participantNames
-      });
-    } catch (error) {
-      console.error('Error joining room:', error);
+    } else {
+      // PostgreSQL implementation with Sequelize
+      try {
+        // Check if room exists in database
+        let room = await Room.findByPk(roomId);
+        
+        // If room doesn't exist, create it
+        if (!room) {
+          room = await Room.create({ id: roomId });
+        }
+        
+        // Add participant to the database
+        const participantId = socket.id;
+        await Participant.upsert({
+          id: participantId,
+          room_id: roomId,
+          username: username,
+          last_active: new Date()
+        });
+        
+        // Get all participants in the room
+        const participants = await Participant.findAll({
+          where: { room_id: roomId },
+          attributes: ['username']
+        });
+        
+        const participantNames = participants.map(p => p.username);
+        
+        // Update room cache
+        if (!rooms.has(roomId)) {
+          console.log(`Creating new room in cache (PostgreSQL): ${roomId}`);
+          rooms.set(roomId, {
+            participants: new Map(),
+            videoLink: room ? room.video_link : null
+          });
+        } else {
+          console.log(`Existing room found in cache (PostgreSQL): ${roomId}`);
+        }
+        
+        // Add participant to room cache
+        rooms.get(roomId).participants.set(socket.id, username);
+        
+        // Log room state after joining
+        logRoomState(roomId);
+        
+        // Notify all clients in the room about the new participant
+        io.to(roomId).emit('room-joined', {
+          username,
+          participants: participantNames
+        });
+        
+        // Send current video to the new participant if it exists
+        const currentRoom = rooms.get(roomId);
+        if (currentRoom && currentRoom.videoLink) {
+          console.log(`Sending existing video to new participant (PostgreSQL): ${username}`);
+          socket.emit('video-set', {
+            videoLink: currentRoom.videoLink,
+            setBy: 'someone in the room'
+          });
+        }
+      } catch (error) {
+        console.error('Error joining room with Sequelize:', error);
+      }
     }
   });
   
@@ -154,22 +304,51 @@ io.on('connection', (socket) => {
   socket.on('set-video', async (data) => {
     try {
       const { roomId, videoLink, setBy } = data;
+      console.log(`Setting video for room ${roomId} by ${setBy}: ${videoLink}`);
       
-      // Update in database
-      await Room.update(
-        { video_link: videoLink },
-        { where: { id: roomId } }
-      );
+      if (!useSqlite) {
+        // PostgreSQL implementation
+        try {
+          // Update in database
+          await Room.update(
+            { video_link: videoLink },
+            { where: { id: roomId } }
+          );
+        } catch (dbError) {
+          console.error('PostgreSQL error updating video link:', dbError);
+        }
+      } else {
+        // SQLite implementation
+        try {
+          const sqlite3 = require('sqlite3').verbose();
+          const db = new sqlite3.Database('./watchparty.db');
+          db.run('UPDATE rooms SET video_link = ? WHERE id = ?', [videoLink, roomId]);
+        } catch (dbError) {
+          console.error('SQLite error updating video link:', dbError);
+        }
+      }
       
-      // Update in cache
+      // Update in cache (very important for synchronization)
       if (rooms.has(roomId)) {
         rooms.get(roomId).videoLink = videoLink;
+        console.log(`Updated video link in room cache: ${roomId}`);
+        logRoomState(roomId);
+      } else {
+        console.log(`Room ${roomId} not found in cache when setting video`);
+        // Create room in cache if it doesn't exist
+        rooms.set(roomId, {
+          participants: new Map(),
+          videoLink: videoLink
+        });
+        console.log(`Created new room in cache when setting video: ${roomId}`);
+        logRoomState(roomId);
       }
       
       // Notify all clients in the room
+      console.log(`Broadcasting video-set to room ${roomId}`);
       io.to(roomId).emit('video-set', { videoLink, setBy });
     } catch (error) {
-      console.error('Error updating video link:', error);
+      console.error('Error in set-video handler:', error);
     }
   });
   
