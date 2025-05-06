@@ -1,40 +1,86 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { Sequelize, DataTypes } = require('sequelize');
+require('dotenv').config();
 
 // Initialize Express app and HTTP server
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Initialize SQLite database
-const db = new sqlite3.Database('./watchparty.db');
-
-// Create database tables if they don't exist
-db.serialize(() => {
-  // Rooms table - stores room information
-  db.run(`
-    CREATE TABLE IF NOT EXISTS rooms (
-      id TEXT PRIMARY KEY,
-      video_link TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  // Participants table - stores active participants in rooms
-  db.run(`
-    CREATE TABLE IF NOT EXISTS participants (
-      id TEXT PRIMARY KEY,
-      room_id TEXT,
-      username TEXT,
-      last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (room_id) REFERENCES rooms(id)
-    )
-  `);
+// Initialize Sequelize with PostgreSQL
+const sequelize = new Sequelize(process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/watchparty', {
+  dialect: 'postgres',
+  dialectOptions: {
+    ssl: process.env.NODE_ENV === 'production' ? {
+      require: true,
+      rejectUnauthorized: false
+    } : false
+  },
+  logging: false
 });
+
+// Define models
+const Room = sequelize.define('Room', {
+  id: {
+    type: DataTypes.STRING,
+    primaryKey: true
+  },
+  video_link: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  created_at: {
+    type: DataTypes.DATE,
+    defaultValue: Sequelize.NOW
+  }
+}, {
+  timestamps: false,
+  tableName: 'rooms'
+});
+
+const Participant = sequelize.define('Participant', {
+  id: {
+    type: DataTypes.STRING,
+    primaryKey: true
+  },
+  room_id: {
+    type: DataTypes.STRING,
+    references: {
+      model: Room,
+      key: 'id'
+    }
+  },
+  username: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  last_active: {
+    type: DataTypes.DATE,
+    defaultValue: Sequelize.NOW
+  }
+}, {
+  timestamps: false,
+  tableName: 'participants'
+});
+
+// Define associations
+Room.hasMany(Participant, { foreignKey: 'room_id' });
+Participant.belongsTo(Room, { foreignKey: 'room_id' });
+
+// Sync database
+(async () => {
+  try {
+    await sequelize.sync();
+    console.log('Database synchronized successfully');
+  } catch (error) {
+    console.error('Unable to sync database:', error);
+  }
+})();
+
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
@@ -49,77 +95,71 @@ io.on('connection', (socket) => {
   let currentUsername = null;
   
   // Join Room
-  socket.on('join-room', (data) => {
-    const { roomId, username } = data;
-    currentRoom = roomId;
-    currentUsername = username;
-    
-    // Join the Socket.io room
-    socket.join(roomId);
-    
-    // Check if room exists in database
-    db.get('SELECT * FROM rooms WHERE id = ?', [roomId], (err, room) => {
-      if (err) {
-        console.error('Database error:', err);
-        return;
-      }
+  socket.on('join-room', async (data) => {
+    try {
+      const { roomId, username } = data;
+      currentRoom = roomId;
+      currentUsername = username;
+      
+      // Join the Socket.io room
+      socket.join(roomId);
+      
+      // Check if room exists in database
+      let room = await Room.findByPk(roomId);
       
       // If room doesn't exist, create it
       if (!room) {
-        db.run('INSERT INTO rooms (id) VALUES (?)', [roomId], (err) => {
-          if (err) console.error('Error creating room:', err);
-        });
+        room = await Room.create({ id: roomId });
       }
       
       // Add participant to the database
       const participantId = socket.id;
-      db.run(
-        'INSERT OR REPLACE INTO participants (id, room_id, username) VALUES (?, ?, ?)',
-        [participantId, roomId, username],
-        (err) => {
-          if (err) console.error('Error adding participant:', err);
-        }
-      );
+      await Participant.upsert({
+        id: participantId,
+        room_id: roomId,
+        username: username,
+        last_active: new Date()
+      });
       
       // Get all participants in the room
-      db.all('SELECT username FROM participants WHERE room_id = ?', [roomId], (err, participants) => {
-        if (err) {
-          console.error('Error getting participants:', err);
-          return;
-        }
-        
-        const participantNames = participants.map(p => p.username);
-        
-        // Update room cache
-        if (!rooms.has(roomId)) {
-          rooms.set(roomId, {
-            participants: new Map(),
-            videoLink: room ? room.video_link : null
-          });
-        }
-        
-        // Add participant to room cache
-        rooms.get(roomId).participants.set(socket.id, username);
-        
-        // Notify all clients in the room about the new participant
-        io.to(roomId).emit('room-joined', {
-          username,
-          participants: participantNames
-        });
+      const participants = await Participant.findAll({
+        where: { room_id: roomId },
+        attributes: ['username']
       });
-    });
+      
+      const participantNames = participants.map(p => p.username);
+      
+      // Update room cache
+      if (!rooms.has(roomId)) {
+        rooms.set(roomId, {
+          participants: new Map(),
+          videoLink: room ? room.video_link : null
+        });
+      }
+      
+      // Add participant to room cache
+      rooms.get(roomId).participants.set(socket.id, username);
+      
+      // Notify all clients in the room about the new participant
+      io.to(roomId).emit('room-joined', {
+        username,
+        participants: participantNames
+      });
+    } catch (error) {
+      console.error('Error joining room:', error);
+    }
   });
   
   // Set Video
-  socket.on('set-video', (data) => {
-    const { roomId, videoLink, setBy } = data;
-    
-    // Update in database
-    db.run('UPDATE rooms SET video_link = ? WHERE id = ?', [videoLink, roomId], (err) => {
-      if (err) {
-        console.error('Error updating video link:', err);
-        return;
-      }
+  socket.on('set-video', async (data) => {
+    try {
+      const { roomId, videoLink, setBy } = data;
+      
+      // Update in database
+      await Room.update(
+        { video_link: videoLink },
+        { where: { id: roomId } }
+      );
       
       // Update in cache
       if (rooms.has(roomId)) {
@@ -128,28 +168,30 @@ io.on('connection', (socket) => {
       
       // Notify all clients in the room
       io.to(roomId).emit('video-set', { videoLink, setBy });
-    });
+    } catch (error) {
+      console.error('Error updating video link:', error);
+    }
   });
   
   // Get Video
-  socket.on('get-video', (data) => {
-    const { roomId } = data;
-    
-    // Check cache first
-    if (rooms.has(roomId) && rooms.get(roomId).videoLink) {
-      socket.emit('video-set', {
-        videoLink: rooms.get(roomId).videoLink,
-        setBy: 'someone'
-      });
-      return;
-    }
-    
-    // If not in cache, check database
-    db.get('SELECT video_link FROM rooms WHERE id = ?', [roomId], (err, room) => {
-      if (err) {
-        console.error('Error getting video link:', err);
+  socket.on('get-video', async (data) => {
+    try {
+      const { roomId } = data;
+      
+      // Check cache first
+      if (rooms.has(roomId) && rooms.get(roomId).videoLink) {
+        socket.emit('video-set', {
+          videoLink: rooms.get(roomId).videoLink,
+          setBy: 'someone'
+        });
         return;
       }
+      
+      // If not in cache, check database
+      const room = await Room.findOne({
+        where: { id: roomId },
+        attributes: ['video_link']
+      });
       
       if (room && room.video_link) {
         socket.emit('video-set', {
@@ -162,7 +204,9 @@ io.on('connection', (socket) => {
           rooms.get(roomId).videoLink = room.video_link;
         }
       }
-    });
+    } catch (error) {
+      console.error('Error getting video link:', error);
+    }
   });
   
   // Video control events
@@ -188,26 +232,26 @@ io.on('connection', (socket) => {
   });
   
   // Disconnect
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
     
     if (currentRoom) {
-      // Remove participant from database
-      db.run('DELETE FROM participants WHERE id = ?', [socket.id], (err) => {
-        if (err) console.error('Error removing participant:', err);
-      });
-      
-      // Remove from cache and notify others
-      if (rooms.has(currentRoom)) {
-        const roomData = rooms.get(currentRoom);
-        roomData.participants.delete(socket.id);
+      try {
+        // Remove participant from database
+        await Participant.destroy({
+          where: { id: socket.id }
+        });
         
-        // Get updated participant list
-        db.all('SELECT username FROM participants WHERE room_id = ?', [currentRoom], (err, participants) => {
-          if (err) {
-            console.error('Error getting participants:', err);
-            return;
-          }
+        // Remove from cache and notify others
+        if (rooms.has(currentRoom)) {
+          const roomData = rooms.get(currentRoom);
+          roomData.participants.delete(socket.id);
+          
+          // Get updated participant list
+          const participants = await Participant.findAll({
+            where: { room_id: currentRoom },
+            attributes: ['username']
+          });
           
           const participantNames = participants.map(p => p.username);
           
@@ -221,23 +265,33 @@ io.on('connection', (socket) => {
           if (roomData.participants.size === 0) {
             rooms.delete(currentRoom);
           }
-        });
+        }
+      } catch (error) {
+        console.error('Error handling disconnect:', error);
       }
     }
   });
 });
 
 // Cleanup inactive participants periodically (every 5 minutes)
-setInterval(() => {
-  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-  
-  db.run('DELETE FROM participants WHERE last_active < ?', [fiveMinutesAgo], function(err) {
-    if (err) {
-      console.error('Error cleaning up inactive participants:', err);
-    } else if (this.changes > 0) {
-      console.log(`Cleaned up ${this.changes} inactive participants`);
+setInterval(async () => {
+  try {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    
+    const result = await Participant.destroy({
+      where: {
+        last_active: {
+          [Sequelize.Op.lt]: fiveMinutesAgo
+        }
+      }
+    });
+    
+    if (result > 0) {
+      console.log(`Cleaned up ${result} inactive participants`);
     }
-  });
+  } catch (error) {
+    console.error('Error cleaning up inactive participants:', error);
+  }
 }, 5 * 60 * 1000);
 
 // Start the server

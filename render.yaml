@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: watchparty
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: watchparty-db
+          property: connectionString
+
+databases:
+  - name: watchparty-db
+    plan: free
