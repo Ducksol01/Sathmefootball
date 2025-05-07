@@ -508,6 +508,59 @@ video {
   animation: pulse 1.5s infinite;
 }
 
+/* Mobile Optimizations */
+.mobile-indicator {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--accent-color);
+  text-align: center;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: none;
+}
+
+.mobile-indicator.visible {
+  display: block;
+}
+
+/* Mobile-specific styles */
+@media (max-width: 768px) {
+  .controls {
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  #video-player,
+  #youtube-player,
+  iframe {
+    max-height: 240px; /* Smaller videos on mobile to reduce bandwidth */
+  }
+  
+  .voice-controls {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.7);
+    border-radius: 20px;
+    padding: 8px;
+    z-index: 1000;
+  }
+  
+  .chat-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  
+  .chat-input-container {
+    position: sticky;
+    bottom: 0;
+    background: white;
+    z-index: 10;
+  }
+}
+
 @keyframes pulse {
   0% { opacity: 0.6; }
   50% { opacity: 1; }

@@ -50,6 +50,14 @@ function init() {
   usernameInput.value = '';
   videoLinkInput.value = '';
   
+  // Check for mobile device
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  if (isMobile) {
+    document.body.classList.add('mobile-device');
+    // Add mobile detection message
+    showStatus('Mobile device detected. Optimizing for better performance.', 'info');
+  }
+  
   // Check for first time visit
   const firstVisit = localStorage.getItem('watchparty_visited') !== 'true';
   
@@ -73,6 +81,9 @@ function init() {
     }
     */
   }
+  
+  // Check network speed to optimize video quality
+  checkNetworkSpeed();
 }
 
 // Event Listeners
@@ -569,12 +580,21 @@ function handleVideoEmbed(url) {
   // Clear the player container first
   const playerContainer = document.getElementById('player-container');
   
+  // Detect if user is on mobile
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  
   // If it's a YouTube embed URL
   if (url.includes('youtube.com/embed/')) {
     videoType = 'youtube';
     
     // Extract video ID for YouTube API
     const videoId = url.split('youtube.com/embed/')[1].split('?')[0];
+    
+    // Add mobile-specific optimization parameters for YouTube
+    let embedUrl = url;
+    if (isMobile && !url.includes('playsinline=1')) {
+      embedUrl = url + (url.includes('?') ? '&' : '?') + 'playsinline=1&rel=0&modestbranding=1&controls=1';
+    }
     
     // Replace video player with YouTube iframe API
     playerContainer.innerHTML = `
@@ -583,6 +603,7 @@ function handleVideoEmbed(url) {
       </div>
       <div class="controls">
         <button id="sync-video">Sync with Room</button>
+        <div class="mobile-indicator ${isMobile ? 'visible' : 'hidden'}">Mobile mode: optimized playback</div>
       </div>
     `;
     
@@ -628,15 +649,17 @@ function handleVideoEmbed(url) {
     // Re-attach sync button event listener
     document.getElementById('sync-video').addEventListener('click', requestSync);
     
-  } else if (url.match(/\.(mp4|webm|ogg)$/i)) {
+  } else if (url.match(/\.(mp4|webm|ogg|mov|m3u8)$/i) || url.includes('.mp4') || url.includes('video')) {
     // It's a direct video file, use the video element
     videoType = 'direct';
     
+    // Enhanced video player with mobile optimizations
     playerContainer.innerHTML = `
-      <video id="video-player" controls></video>
+      <video id="video-player" controls playsinline preload="auto"></video>
       <div class="controls">
         <button id="play-pause">Play</button>
         <button id="sync-video">Sync with Room</button>
+        <div class="mobile-indicator ${isMobile ? 'visible' : 'hidden'}">Mobile mode: optimized playback</div>
       </div>
     `;
     
@@ -873,28 +896,32 @@ function formatTimestamp(timestamp) {
 }
 
 // Voice Chat Functions
-async function toggleMicrophone() {
-  if (micEnabled) {
-    // Disable microphone
-    stopLocalStream();
-    micEnabled = false;
-    toggleMicButton.innerHTML = '<i class="fas fa-microphone-slash"></i>';
-    toggleMicButton.classList.remove('active');
-    showStatus('Microphone disabled', 'success');
-    
-    // Notify others that mic is off
-    socket.emit('voice-state-change', {
-      roomId: currentRoom,
-      isMuted: true
-    });
-  } else {
-    try {
-      // Request microphone access
-      await startLocalStream();
+async function startMicrophone() {
+  if (localStream) return; // Already started
+  
+  showStatus('Requesting microphone access...', 'info');
+  
+  // Mobile-optimized audio constraints
+  const audioConstraints = {
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      sampleRate: 44100
+    },
+    video: false
+  };
+  
+  navigator.mediaDevices.getUserMedia(audioConstraints)
+    .then(stream => {
+      localStream = stream;
+      
+      // Set microphone state
       micEnabled = true;
       toggleMicButton.innerHTML = '<i class="fas fa-microphone"></i>';
       toggleMicButton.classList.add('active');
-      showStatus('Microphone enabled', 'success');
+      
+      showStatus('Microphone connected!', 'success');
       
       // Notify others that mic is on
       socket.emit('voice-state-change', {
@@ -902,12 +929,45 @@ async function toggleMicrophone() {
         isMuted: false
       });
       
-      // Connect to peers
+      // Connect to all existing peers
       connectToPeers();
-    } catch (error) {
-      console.error('Error accessing microphone', error);
-      showStatus('Error accessing microphone: ' + error.message, 'error');
+    })
+    .catch(error => {
+      console.error('Error accessing microphone:', error);
+      micEnabled = false;
+      toggleMicButton.classList.remove('active');
+      
+      // Show more detailed error to user
+      if (error.name === 'NotAllowedError') {
+        showStatus('Microphone access denied. Please allow microphone access in your browser settings.', 'error');
+      } else if (error.name === 'NotFoundError') {
+        showStatus('No microphone found. Please connect a microphone and try again.', 'error');
+      } else {
+        showStatus(`Microphone error: ${error.message}`, 'error');
+      }
+    });
+}
+
+function toggleMicrophone() {
+  if (micEnabled) {
+    // Turn off microphone
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      localStream = null;
     }
+    
+    micEnabled = false;
+    toggleMicButton.innerHTML = '<i class="fas fa-microphone-slash"></i>';
+    toggleMicButton.classList.remove('active');
+    showStatus('Microphone disabled', 'info');
+    
+    // Notify others that mic is off
+    socket.emit('voice-state-change', {
+      roomId: currentRoom,
+      isMuted: true
+    });
+  } else {
+    startMicrophone();
   }
 }
 
@@ -1179,5 +1239,90 @@ socket.on('voice-state-change', (data) => {
   }, 5000);
 });
 
+// Network speed detection for video optimization
+function checkNetworkSpeed() {
+  // Default to low quality on mobile
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  if (isMobile) {
+    window.lowBandwidth = true;
+    return;
+  }
+  
+  // Simple network speed test
+  const startTime = Date.now();
+  const imageUrl = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/ca/1x1.png/100px-1x1.png' + '?r=' + Math.random();
+  const downloadSize = 11035; // bytes
+  
+  const testImage = new Image();
+  testImage.onload = function() {
+    const endTime = Date.now();
+    const duration = (endTime - startTime) / 1000; // seconds
+    const speedBps = downloadSize * 8 / duration; // bits per second
+    const speedKbps = speedBps / 1024; // kilobits per second
+    
+    console.log(`Network speed: ${Math.round(speedKbps)} Kbps`);
+    
+    // Set low bandwidth mode if speed is too low
+    if (speedKbps < 1000) { // Less than 1 Mbps
+      window.lowBandwidth = true;
+      showStatus('Low network speed detected. Using optimized video quality.', 'info');
+    } else {
+      window.lowBandwidth = false;
+    }
+  };
+  
+  testImage.onerror = function() {
+    // Failed to test speed, assume low bandwidth
+    window.lowBandwidth = true;
+  };
+  
+  testImage.src = imageUrl;
+}
+
+// Additional helper for mobile devices
+function optimizeForMobile() {
+  // Detect if we're on a mobile device
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  
+  if (isMobile) {
+    // Use lower quality video
+    if (videoType === 'youtube' && youtubePlayer) {
+      youtubePlayer.setPlaybackQuality('small');
+    }
+    
+    // Reduce animation and effects
+    document.documentElement.style.setProperty('--transition-speed', '0.1s');
+    
+    // Enable hardware acceleration
+    document.body.style.transform = 'translateZ(0)';
+    
+    // Add meta viewport for better mobile experience
+    if (!document.querySelector('meta[name="viewport"]')) {
+      const metaViewport = document.createElement('meta');
+      metaViewport.name = 'viewport';
+      metaViewport.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no';
+      document.head.appendChild(metaViewport);
+    }
+    
+    // Optimize video streaming parameters
+    if (videoType === 'direct' && videoPlayer) {
+      videoPlayer.preload = 'auto';
+      videoPlayer.playsInline = true;
+      videoPlayer.autoplay = false;
+      videoPlayer.controls = true;
+      
+      // Set lower buffer size for faster loading
+      if (videoPlayer.buffered && videoPlayer.duration) {
+        videoPlayer.currentTime = videoPlayer.buffered.end(0) || 0;
+      }
+    }
+  }
+  
+  return isMobile;
+}
+
 // Initialize the app
 init();
+
+// Call optimizeForMobile on page load
+window.addEventListener('load', optimizeForMobile);
