@@ -18,12 +18,30 @@ const playerContainerDiv = document.getElementById('player-container');
 const participantsDiv = document.getElementById('participants');
 const copyRoomButton = document.getElementById('copy-room');
 
+// Chat elements
+const chatContainerDiv = document.getElementById('chat-container');
+const chatMessagesDiv = document.getElementById('chat-messages');
+const chatInput = document.getElementById('chat-input');
+const sendMessageButton = document.getElementById('send-message');
+const toggleMicButton = document.getElementById('toggle-mic');
+const toggleAudioButton = document.getElementById('toggle-audio');
+
 // App State
 let currentRoom = '';
 let username = '';
 let isSyncingVideo = false;
 let videoType = 'direct'; // 'direct' or 'embed'
 let youtubePlayer = null;
+
+// Voice chat state
+let micEnabled = false;
+let audioEnabled = true;
+let peerConnections = {};
+let localStream = null;
+let mediaConstraints = {
+  audio: true,
+  video: false
+};
 
 // Initialize
 function init() {
@@ -63,6 +81,19 @@ setVideoButton.addEventListener('click', setVideo);
 playPauseButton.addEventListener('click', togglePlayPause);
 syncButton.addEventListener('click', requestSync);
 copyRoomButton.addEventListener('click', copyRoomId);
+
+// Chat event listeners
+sendMessageButton.addEventListener('click', sendChatMessage);
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+
+// Voice chat event listeners
+toggleMicButton.addEventListener('click', toggleMicrophone);
+toggleAudioButton.addEventListener('click', toggleAudio);
 
 // Video player events
 videoPlayer.addEventListener('play', () => {
@@ -253,6 +284,12 @@ function updateParticipants(participants) {
     const el = document.createElement('span');
     el.className = 'participant';
     el.textContent = participant;
+    // Store user ID for peer connections
+    const userId = Object.keys(rooms.get(currentRoom)?.participants || {})
+      .find(id => rooms.get(currentRoom)?.participants.get(id) === participant);
+    if (userId) {
+      el.dataset.userId = userId;
+    }
     participantsDiv.appendChild(el);
   });
 }
@@ -262,12 +299,22 @@ socket.on('room-joined', (data) => {
   updateParticipants(data.participants);
   showStatus(`${data.username} joined the room`, 'success');
   
+  // Show chat container
+  chatContainerDiv.classList.remove('hidden');
+  
   // Request sync from other participants to make sure we're in sync
   // Small delay to ensure connection is fully established
   setTimeout(() => {
     console.log('Requesting initial sync after joining room');
     requestSync();
   }, 1000);
+  
+  // If microphone is enabled, connect to the new peer
+  if (micEnabled && localStream) {
+    // The new user ID should be in the updated participants list
+    // We'll connect to them from our end
+    connectToPeers();
+  }
 });
 
 socket.on('room-left', (data) => {
@@ -767,6 +814,370 @@ style.textContent = `
   }
 `;
 document.head.appendChild(style);
+
+// Chat Functions
+function sendChatMessage() {
+  const message = chatInput.value.trim();
+  
+  if (!message) return;
+  
+  // Send chat message to server
+  socket.emit('chat-message', {
+    roomId: currentRoom,
+    message,
+    sender: username
+  });
+  
+  // Clear input
+  chatInput.value = '';
+}
+
+function addChatMessage(messageObj) {
+  const { sender, message, timestamp, senderId } = messageObj;
+  
+  // Create message element
+  const messageEl = document.createElement('div');
+  messageEl.classList.add('message');
+  messageEl.classList.add(senderId === socket.id ? 'from-me' : 'from-other');
+  
+  // Add sender name (except for own messages)
+  if (senderId !== socket.id) {
+    const senderEl = document.createElement('div');
+    senderEl.classList.add('sender');
+    senderEl.textContent = sender;
+    messageEl.appendChild(senderEl);
+  }
+  
+  // Add message text
+  const textEl = document.createElement('div');
+  textEl.classList.add('text');
+  textEl.textContent = message;
+  messageEl.appendChild(textEl);
+  
+  // Add timestamp
+  const timeEl = document.createElement('div');
+  timeEl.classList.add('time');
+  timeEl.textContent = formatTimestamp(timestamp);
+  messageEl.appendChild(timeEl);
+  
+  // Add to chat container
+  chatMessagesDiv.appendChild(messageEl);
+  
+  // Scroll to bottom
+  chatMessagesDiv.scrollTop = chatMessagesDiv.scrollHeight;
+}
+
+function formatTimestamp(timestamp) {
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Voice Chat Functions
+async function toggleMicrophone() {
+  if (micEnabled) {
+    // Disable microphone
+    stopLocalStream();
+    micEnabled = false;
+    toggleMicButton.innerHTML = '<i class="fas fa-microphone-slash"></i>';
+    toggleMicButton.classList.remove('active');
+    showStatus('Microphone disabled', 'success');
+    
+    // Notify others that mic is off
+    socket.emit('voice-state-change', {
+      roomId: currentRoom,
+      isMuted: true
+    });
+  } else {
+    try {
+      // Request microphone access
+      await startLocalStream();
+      micEnabled = true;
+      toggleMicButton.innerHTML = '<i class="fas fa-microphone"></i>';
+      toggleMicButton.classList.add('active');
+      showStatus('Microphone enabled', 'success');
+      
+      // Notify others that mic is on
+      socket.emit('voice-state-change', {
+        roomId: currentRoom,
+        isMuted: false
+      });
+      
+      // Connect to peers
+      connectToPeers();
+    } catch (error) {
+      console.error('Error accessing microphone', error);
+      showStatus('Error accessing microphone: ' + error.message, 'error');
+    }
+  }
+}
+
+function toggleAudio() {
+  audioEnabled = !audioEnabled;
+  
+  if (audioEnabled) {
+    toggleAudioButton.innerHTML = '<i class="fas fa-volume-up"></i>';
+    toggleAudioButton.classList.add('active');
+    showStatus('Audio enabled', 'success');
+  } else {
+    toggleAudioButton.innerHTML = '<i class="fas fa-volume-mute"></i>';
+    toggleAudioButton.classList.remove('active');
+    showStatus('Audio disabled', 'success');
+  }
+  
+  // Update all remote audio elements
+  document.querySelectorAll('audio.remote-audio').forEach(audio => {
+    audio.muted = !audioEnabled;
+  });
+}
+
+async function startLocalStream() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+    return true;
+  } catch (error) {
+    console.error('Error accessing media devices.', error);
+    throw error;
+  }
+}
+
+function stopLocalStream() {
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  
+  // Close all peer connections
+  Object.values(peerConnections).forEach(pc => pc.close());
+  peerConnections = {};
+}
+
+function createPeerConnection(peerId) {
+  if (peerConnections[peerId]) return;
+  
+  console.log(`Creating peer connection to ${peerId}`);
+  
+  // Create a new RTCPeerConnection
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  });
+  
+  // Store the connection
+  peerConnections[peerId] = pc;
+  
+  // Add local stream tracks to peer connection
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      pc.addTrack(track, localStream);
+    });
+  }
+  
+  // ICE candidate event
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit('voice-signal', {
+        roomId: currentRoom,
+        to: peerId,
+        signal: {
+          type: 'ice-candidate',
+          candidate: event.candidate
+        }
+      });
+    }
+  };
+  
+  // Stream received event
+  pc.ontrack = (event) => {
+    if (!document.getElementById(`audio-${peerId}`)) {
+      const audioEl = document.createElement('audio');
+      audioEl.id = `audio-${peerId}`;
+      audioEl.className = 'remote-audio';
+      audioEl.autoplay = true;
+      audioEl.muted = !audioEnabled;
+      document.body.appendChild(audioEl);
+      
+      // Add audio visualization or indicator here if desired
+    }
+    
+    const audioEl = document.getElementById(`audio-${peerId}`);
+    if (audioEl.srcObject !== event.streams[0]) {
+      audioEl.srcObject = event.streams[0];
+      console.log('Received remote stream');
+    }
+  };
+  
+  // Create and send offer
+  pc.createOffer()
+    .then(offer => pc.setLocalDescription(offer))
+    .then(() => {
+      socket.emit('voice-signal', {
+        roomId: currentRoom,
+        to: peerId,
+        signal: {
+          type: 'offer',
+          sdp: pc.localDescription
+        }
+      });
+    })
+    .catch(error => {
+      console.error('Error creating offer', error);
+    });
+  
+  return pc;
+}
+
+function connectToPeers() {
+  if (!micEnabled || !localStream) return;
+  
+  // Connect to all existing participants
+  const participantEls = participantsDiv.querySelectorAll('.participant');
+  participantEls.forEach(el => {
+    const peerId = el.dataset.userId;
+    if (peerId && peerId !== socket.id && !peerConnections[peerId]) {
+      createPeerConnection(peerId);
+    }
+  });
+}
+
+// Add socket handlers for chat messages
+socket.on('chat-message', (messageObj) => {
+  addChatMessage(messageObj);
+});
+
+socket.on('chat-history', (data) => {
+  // Clear existing messages
+  chatMessagesDiv.innerHTML = '';
+  
+  // Add all messages from history
+  data.messages.forEach(msg => {
+    addChatMessage(msg);
+  });
+  
+  // Scroll to bottom
+  chatMessagesDiv.scrollTop = chatMessagesDiv.scrollHeight;
+});
+
+socket.on('show-chat', () => {
+  chatContainerDiv.classList.remove('hidden');
+});
+
+// Voice chat signal handlers
+socket.on('voice-signal', (data) => {
+  const { signal, from } = data;
+  
+  if (!peerConnections[from] && signal.type === 'offer') {
+    // Create a new peer connection if we receive an offer
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    });
+    
+    peerConnections[from] = pc;
+    
+    // Add local stream tracks if microphone is enabled
+    if (micEnabled && localStream) {
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+    }
+    
+    // ICE candidate event
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit('voice-signal', {
+          roomId: currentRoom,
+          to: from,
+          signal: {
+            type: 'ice-candidate',
+            candidate: event.candidate
+          }
+        });
+      }
+    };
+    
+    // Stream received event
+    pc.ontrack = (event) => {
+      if (!document.getElementById(`audio-${from}`)) {
+        const audioEl = document.createElement('audio');
+        audioEl.id = `audio-${from}`;
+        audioEl.className = 'remote-audio';
+        audioEl.autoplay = true;
+        audioEl.muted = !audioEnabled;
+        document.body.appendChild(audioEl);
+      }
+      
+      const audioEl = document.getElementById(`audio-${from}`);
+      if (audioEl.srcObject !== event.streams[0]) {
+        audioEl.srcObject = event.streams[0];
+        console.log('Received remote stream');
+      }
+    };
+    
+    // Set remote description (the offer)
+    pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
+      .then(() => {
+        // Create answer
+        return pc.createAnswer();
+      })
+      .then(answer => {
+        // Set local description
+        return pc.setLocalDescription(answer);
+      })
+      .then(() => {
+        // Send answer back
+        socket.emit('voice-signal', {
+          roomId: currentRoom,
+          to: from,
+          signal: {
+            type: 'answer',
+            sdp: pc.localDescription
+          }
+        });
+      })
+      .catch(error => {
+        console.error('Error creating answer', error);
+      });
+  } else if (peerConnections[from] && signal.type === 'answer') {
+    // Set remote description (the answer)
+    peerConnections[from].setRemoteDescription(new RTCSessionDescription(signal.sdp))
+      .catch(error => {
+        console.error('Error setting remote description', error);
+      });
+  } else if (peerConnections[from] && signal.type === 'ice-candidate') {
+    // Add ICE candidate
+    peerConnections[from].addIceCandidate(new RTCIceCandidate(signal.candidate))
+      .catch(error => {
+        console.error('Error adding ICE candidate', error);
+      });
+  }
+});
+
+socket.on('voice-state-change', (data) => {
+  const { userId, username, isMuted } = data;
+  
+  // Show audio status message
+  const statusMsg = document.createElement('div');
+  statusMsg.classList.add('audio-status');
+  
+  if (isMuted) {
+    statusMsg.innerHTML = `<i class="fas fa-microphone-slash"></i> ${username} muted their microphone`;
+  } else {
+    statusMsg.innerHTML = `<i class="fas fa-microphone"></i> ${username} unmuted their microphone`;
+    statusMsg.classList.add('speaking');
+  }
+  
+  chatMessagesDiv.appendChild(statusMsg);
+  chatMessagesDiv.scrollTop = chatMessagesDiv.scrollHeight;
+  
+  // Auto-remove the status after a few seconds
+  setTimeout(() => {
+    statusMsg.remove();
+  }, 5000);
+});
 
 // Initialize the app
 init();

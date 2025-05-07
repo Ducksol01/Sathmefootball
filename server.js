@@ -130,6 +130,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Room data cache (in-memory)
 const rooms = new Map();
 
+// Message history (limited to last 50 messages per room)
+const messageHistory = new Map();
+
 // Debug function to log room state
 function logRoomState(roomId) {
   if (rooms.has(roomId)) {
@@ -138,6 +141,21 @@ function logRoomState(roomId) {
     console.log('Participants:', Array.from(room.participants.entries()));
   } else {
     console.log(`Room ${roomId} not found in cache`);
+  }
+}
+
+// Function to add a message to history
+function addMessageToHistory(roomId, message) {
+  if (!messageHistory.has(roomId)) {
+    messageHistory.set(roomId, []);
+  }
+  
+  const messages = messageHistory.get(roomId);
+  messages.push(message);
+  
+  // Keep only last 50 messages
+  if (messages.length > 50) {
+    messages.shift();
   }
 }
 
@@ -229,6 +247,18 @@ io.on('connection', (socket) => {
                 setBy: 'someone in the room'
               });
             }
+            
+            // Send chat history to new participant
+            if (messageHistory.has(roomId)) {
+              const messages = messageHistory.get(roomId);
+              if (messages.length > 0) {
+                console.log(`Sending ${messages.length} chat messages to new participant: ${username}`);
+                socket.emit('chat-history', { messages });
+              }
+            }
+            
+            // Show the chat container
+            socket.emit('show-chat');
           });
         });
       } catch (error) {
@@ -294,6 +324,18 @@ io.on('connection', (socket) => {
             setBy: 'someone in the room'
           });
         }
+        
+        // Send chat history to new participant
+        if (messageHistory.has(roomId)) {
+          const messages = messageHistory.get(roomId);
+          if (messages.length > 0) {
+            console.log(`Sending ${messages.length} chat messages to new participant (PostgreSQL): ${username}`);
+            socket.emit('chat-history', { messages });
+          }
+        }
+        
+        // Show the chat container
+        socket.emit('show-chat');
       } catch (error) {
         console.error('Error joining room with Sequelize:', error);
       }
@@ -399,6 +441,51 @@ io.on('connection', (socket) => {
   
   socket.on('video-seek', (data) => {
     socket.to(data.roomId).emit('video-seek', { currentTime: data.currentTime });
+  });
+  
+  // Chat message handler
+  socket.on('chat-message', (data) => {
+    const { roomId, message, sender } = data;
+    console.log(`Chat message in room ${roomId} from ${sender}: ${message}`);
+    
+    // Create message object with timestamp
+    const messageObj = {
+      sender,
+      message,
+      timestamp: new Date().toISOString(),
+      senderId: socket.id
+    };
+    
+    // Add to message history
+    addMessageToHistory(roomId, messageObj);
+    
+    // Broadcast to all users in the room including sender for consistent timestamp
+    io.to(roomId).emit('chat-message', messageObj);
+  });
+  
+  // Voice chat signaling
+  socket.on('voice-signal', (data) => {
+    const { roomId, signal, to } = data;
+    console.log(`Voice signal from ${socket.id} to ${to} in room ${roomId}`);
+    
+    // Forward the signal to the specific recipient
+    socket.to(to).emit('voice-signal', {
+      signal,
+      from: socket.id
+    });
+  });
+  
+  // Voice chat state change (mute/unmute)
+  socket.on('voice-state-change', (data) => {
+    const { roomId, isMuted } = data;
+    console.log(`Voice state change in room ${roomId} - User ${socket.id} is ${isMuted ? 'muted' : 'unmuted'}`);
+    
+    // Broadcast voice state change to room
+    socket.to(roomId).emit('voice-state-change', {
+      userId: socket.id,
+      username: currentUsername,
+      isMuted
+    });
   });
   
   // Sync request/response

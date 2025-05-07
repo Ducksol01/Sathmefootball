@@ -52,11 +52,32 @@
       <div id="participants"></div>
     </div>
 
-    <div id="player-container" class="hidden">
-      <video id="video-player" controls></video>
-      <div class="controls">
-        <button id="play-pause"><i class="fas fa-play"></i> Play</button>
-        <button id="sync-video"><i class="fas fa-sync"></i> Sync with Room</button>
+    <div class="main-content">
+      <div id="player-container" class="hidden">
+        <video id="video-player" controls></video>
+        <div class="controls">
+          <button id="play-pause"><i class="fas fa-play"></i> Play</button>
+          <button id="sync-video"><i class="fas fa-sync"></i> Sync with Room</button>
+        </div>
+      </div>
+      
+      <div id="chat-container" class="hidden">
+        <div class="chat-header">
+          <h3><i class="fas fa-comment"></i> Chat</h3>
+          <div class="voice-controls">
+            <button id="toggle-mic" class="mic-btn" title="Toggle Microphone">
+              <i class="fas fa-microphone"></i>
+            </button>
+            <button id="toggle-audio" class="audio-btn" title="Toggle Audio">
+              <i class="fas fa-volume-up"></i>
+            </button>
+          </div>
+        </div>
+        <div id="chat-messages"></div>
+        <div class="chat-input-container">
+          <input type="text" id="chat-input" placeholder="Type a message...">
+          <button id="send-message"><i class="fas fa-paper-plane"></i></button>
+        </div>
       </div>
     </div>
     
