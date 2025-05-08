@@ -897,55 +897,112 @@ function formatTimestamp(timestamp) {
 
 // Voice Chat Functions
 async function startMicrophone() {
-  if (localStream) return; // Already started
+  if (localStream) {
+    stopLocalStream(); // Clean up existing stream first
+  }
   
   showStatus('Requesting microphone access...', 'info');
   
-  // Mobile-optimized audio constraints
+  // Optimized audio constraints for voice chat
   const audioConstraints = {
     audio: {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
-      sampleRate: 44100
+      sampleRate: 48000,
+      channelCount: 1,
+      latency: 0,
+      volume: 1.0
     },
     video: false
   };
   
-  navigator.mediaDevices.getUserMedia(audioConstraints)
-    .then(stream => {
-      localStream = stream;
-      
-      // Set microphone state
-      micEnabled = true;
-      toggleMicButton.innerHTML = '<i class="fas fa-microphone"></i>';
-      toggleMicButton.classList.add('active');
-      
-      showStatus('Microphone connected!', 'success');
-      
-      // Notify others that mic is on
-      socket.emit('voice-state-change', {
-        roomId: currentRoom,
-        isMuted: false
-      });
-      
-      // Connect to all existing peers
-      connectToPeers();
-    })
-    .catch(error => {
-      console.error('Error accessing microphone:', error);
-      micEnabled = false;
-      toggleMicButton.classList.remove('active');
-      
-      // Show more detailed error to user
-      if (error.name === 'NotAllowedError') {
-        showStatus('Microphone access denied. Please allow microphone access in your browser settings.', 'error');
-      } else if (error.name === 'NotFoundError') {
-        showStatus('No microphone found. Please connect a microphone and try again.', 'error');
-      } else {
-        showStatus(`Microphone error: ${error.message}`, 'error');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+    
+    // Set up audio processing
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const sourceNode = audioContext.createMediaStreamSource(stream);
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = 1.0; // Adjust volume if needed
+    
+    // Add some audio processing for better quality
+    const compressor = audioContext.createDynamicsCompressor();
+    compressor.threshold.value = -50;
+    compressor.knee.value = 40;
+    compressor.ratio.value = 12;
+    compressor.attack.value = 0;
+    compressor.release.value = 0.25;
+    
+    // Connect the audio nodes
+    sourceNode.connect(gainNode);
+    gainNode.connect(compressor);
+    compressor.connect(audioContext.destination);
+    
+    localStream = stream;
+    
+    // Set microphone state
+    micEnabled = true;
+    toggleMicButton.innerHTML = '<i class="fas fa-microphone"></i>';
+    toggleMicButton.classList.add('active');
+    showStatus('Microphone enabled', 'success');
+    
+    // Close any existing peer connections
+    Object.keys(peerConnections).forEach(peerId => {
+      if (peerConnections[peerId]) {
+        peerConnections[peerId].close();
+        delete peerConnections[peerId];
       }
     });
+    
+    // Connect to all participants
+    await connectToPeers();
+    
+    // Notify others that mic is on
+    socket.emit('voice-state-change', {
+      roomId: currentRoom,
+      isMuted: false
+    });
+    
+    // Monitor audio levels for activity
+    const audioAnalyser = audioContext.createAnalyser();
+    compressor.connect(audioAnalyser);
+    audioAnalyser.fftSize = 256;
+    const bufferLength = audioAnalyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    
+    function checkAudioLevel() {
+      if (!micEnabled) return;
+      
+      audioAnalyser.getByteFrequencyData(dataArray);
+      const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+      
+      // Visual feedback when speaking
+      if (average > 30) {
+        toggleMicButton.classList.add('speaking');
+      } else {
+        toggleMicButton.classList.remove('speaking');
+      }
+      
+      requestAnimationFrame(checkAudioLevel);
+    }
+    
+    checkAudioLevel();
+    
+  } catch (error) {
+    console.error('Error accessing microphone:', error);
+    micEnabled = false;
+    toggleMicButton.classList.remove('active');
+    
+    // Show more detailed error to user
+    if (error.name === 'NotAllowedError') {
+      showStatus('Microphone access denied. Please allow microphone access in your browser settings.', 'error');
+    } else if (error.name === 'NotFoundError') {
+      showStatus('No microphone found. Please connect a microphone and try again.', 'error');
+    } else {
+      showStatus(`Microphone error: ${error.message}`, 'error');
+    }
+  }
 }
 
 function toggleMicrophone() {
@@ -1012,16 +1069,27 @@ function stopLocalStream() {
 }
 
 function createPeerConnection(peerId) {
-  if (peerConnections[peerId]) return;
+  if (peerConnections[peerId]) {
+    console.log(`Closing existing connection to ${peerId}`);
+    peerConnections[peerId].close();
+    delete peerConnections[peerId];
+  }
   
   console.log(`Creating peer connection to ${peerId}`);
   
-  // Create a new RTCPeerConnection
+  // Create a new RTCPeerConnection with improved configuration
   const pc = new RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
-    ]
+      { urls: 'stun1.l.google.com:19302' },
+      { urls: 'stun2.l.google.com:19302' },
+      { urls: 'stun3.l.google.com:19302' },
+      { urls: 'stun4.l.google.com:19302' }
+    ],
+    iceTransportPolicy: 'all',
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require',
+    iceCandidatePoolSize: 10
   });
   
   // Store the connection
@@ -1029,14 +1097,22 @@ function createPeerConnection(peerId) {
   
   // Add local stream tracks to peer connection
   if (localStream) {
-    localStream.getTracks().forEach(track => {
-      pc.addTrack(track, localStream);
-    });
+    try {
+      localStream.getTracks().forEach(track => {
+        console.log(`Adding track to peer connection: ${track.kind}`);
+        pc.addTrack(track, localStream);
+      });
+    } catch (error) {
+      console.error('Error adding tracks to peer connection:', error);
+    }
+  } else {
+    console.warn('No local stream available when creating peer connection');
   }
   
   // ICE candidate event
   pc.onicecandidate = (event) => {
     if (event.candidate) {
+      console.log('Sending ICE candidate');
       socket.emit('voice-signal', {
         roomId: currentRoom,
         to: peerId,
@@ -1048,30 +1124,84 @@ function createPeerConnection(peerId) {
     }
   };
   
+  // ICE connection state change
+  pc.oniceconnectionstatechange = () => {
+    console.log(`ICE connection state with ${peerId}: ${pc.iceConnectionState}`);
+    if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+      console.log('Attempting to restart ICE');
+      pc.restartIce();
+    }
+  };
+  
   // Stream received event
   pc.ontrack = (event) => {
+    console.log(`Received ${event.streams.length} streams from ${peerId}`);
     if (!document.getElementById(`audio-${peerId}`)) {
       const audioEl = document.createElement('audio');
       audioEl.id = `audio-${peerId}`;
       audioEl.className = 'remote-audio';
       audioEl.autoplay = true;
+      audioEl.playsInline = true;
       audioEl.muted = !audioEnabled;
       document.body.appendChild(audioEl);
       
-      // Add audio visualization or indicator here if desired
+      // Add audio visualization
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(event.streams[0]);
+      const analyser = audioContext.createAnalyser();
+      source.connect(analyser);
+      
+      // Visual feedback when receiving audio
+      const participantEl = document.querySelector(`[data-user-id="${peerId}"]`);
+      if (participantEl) {
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+        
+        function checkAudio() {
+          if (!audioEnabled) return;
+          analyser.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+          
+          if (average > 30) {
+            participantEl.classList.add('speaking');
+          } else {
+            participantEl.classList.remove('speaking');
+          }
+          
+          requestAnimationFrame(checkAudio);
+        }
+        
+        checkAudio();
+      }
     }
     
     const audioEl = document.getElementById(`audio-${peerId}`);
     if (audioEl.srcObject !== event.streams[0]) {
       audioEl.srcObject = event.streams[0];
-      console.log('Received remote stream');
+      console.log('Updated remote stream source');
+      
+      // Ensure audio is playing
+      audioEl.play().catch(error => {
+        console.error('Error playing remote audio:', error);
+      });
     }
   };
   
-  // Create and send offer
-  pc.createOffer()
-    .then(offer => pc.setLocalDescription(offer))
+  // Create and send offer with audio preferences
+  const offerOptions = {
+    offerToReceiveAudio: true,
+    offerToReceiveVideo: false,
+    voiceActivityDetection: true
+  };
+  
+  pc.createOffer(offerOptions)
+    .then(offer => {
+      // Modify SDP to prioritize audio quality
+      offer.sdp = offer.sdp.replace('useinbandfec=1', 'useinbandfec=1; stereo=1; maxaveragebitrate=510000');
+      return pc.setLocalDescription(offer);
+    })
     .then(() => {
+      console.log('Sending offer to peer');
       socket.emit('voice-signal', {
         roomId: currentRoom,
         to: peerId,
@@ -1082,7 +1212,7 @@ function createPeerConnection(peerId) {
       });
     })
     .catch(error => {
-      console.error('Error creating offer', error);
+      console.error('Error creating/sending offer:', error);
     });
   
   return pc;
